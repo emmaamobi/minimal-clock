@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Clock</title>
+<style>
+  :root {
+    --bg: #000;
+    --fg: #fff;
+    --idle: 2400ms; /* how long after the last movement before everything fades away */
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+
+  /* While idle, the cursor disappears too, so the screen is nothing but the time. */
+  body.idle { cursor: none; }
+
+  #stage {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  #time {
+    font-weight: 500;
+    line-height: 1;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1;
+    letter-spacing: -0.01em;
+    /* fontSize is set precisely by JS to fill the viewport */
+  }
+
+  #time .ampm {
+    font-size: 0.32em;
+    font-weight: 500;
+    margin-left: 0.25em;
+    vertical-align: 0.85em;
+    letter-spacing: 0.02em;
+    opacity: 0.55;
+  }
+
+  /* ---- the fade-away control panel ---- */
+  #panel {
+    position: fixed;
+    left: 50%;
+    bottom: 28px;
+    transform: translateX(-50%) translateY(8px);
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 10px 16px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.10);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    font-size: 14px;
+    color: rgba(255,255,255,0.85);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 260ms ease, transform 260ms ease;
+    z-index: 10;
+    max-width: calc(100vw - 24px);
+  }
+
+  /* Visible when the user is active, or whenever a control inside has focus. */
+  body:not(.idle) #panel,
+  #panel:focus-within {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateX(-50%) translateY(0);
+  }
+
+  #panel label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    white-space: nowrap;
+  }
+
+  #tz {
+    appearance: none;
+    -webkit-appearance: none;
+    background: rgba(255,255,255,0.08);
+    color: #fff;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 8px;
+    padding: 6px 28px 6px 10px;
+    font: inherit;
+    max-width: 230px;
+    cursor: pointer;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M2 4l4 4 4-4' fill='none' stroke='white' stroke-width='1.5' stroke-opacity='0.6'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 9px center;
+  }
+  #tz option { background: #111; color: #fff; }
+
+  .seg {
+    display: inline-flex;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .seg button {
+    background: transparent;
+    color: rgba(255,255,255,0.6);
+    border: 0;
+    padding: 6px 10px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .seg button[aria-pressed="true"] { background: rgba(255,255,255,0.16); color: #fff; }
+
+  .divider { width: 1px; height: 20px; background: rgba(255,255,255,0.12); }
+
+  .ghost {
+    background: transparent;
+    color: rgba(255,255,255,0.55);
+    border: 0;
+    padding: 6px 6px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .ghost:hover { color: #fff; }
+
+  #panel :focus-visible {
+    outline: 2px solid rgba(255,255,255,0.7);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    #panel { transition: none; }
+  }
+
+  @media (max-width: 560px) {
+    #panel { gap: 12px; font-size: 13px; bottom: 18px; }
+    .divider { display: none; }
+    #tz { max-width: 150px; }
+  }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <div id="time" aria-live="off"></div>
+  </div>
+
+  <div id="panel" role="group" aria-label="Clock settings">
+    <label>
+      <span>Zone</span>
+      <select id="tz" aria-label="Time zone"></select>
+    </label>
+    <div class="divider"></div>
+    <div class="seg" role="group" aria-label="Hour format">
+      <button id="fmt24" type="button" aria-pressed="true">24h</button>
+      <button id="fmt12" type="button" aria-pressed="false">12h</button>
+    </div>
+    <button id="secBtn" class="ghost" type="button" aria-pressed="true">Seconds: on</button>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  var timeEl = document.getElementById("time");
+  var tzSel  = document.getElementById("tz");
+  var fmt24  = document.getElementById("fmt24");
+  var fmt12  = document.getElementById("fmt12");
+  var secBtn = document.getElementById("secBtn");
+
+  // ---- persisted settings (works once deployed; harmless if storage is blocked) ----
+  var store = {
+    get: function (k, d) { try { var v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } },
+    set: function (k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+  };
+
+  var localZone = "UTC";
+  try { localZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; } catch (e) {}
+
+  var settings = {
+    zone:    store.get("clock.zone", localZone),
+    hour12:  store.get("clock.hour12", "false") === "true",
+    seconds: store.get("clock.seconds", "true") === "true"
+  };
+
+  // ---- populate the time-zone list ----
+  function zoneList() {
+    try {
+      if (typeof Intl.supportedValuesOf === "function") {
+        var z = Intl.supportedValuesOf("timeZone");
+        if (z && z.length) return z;
+      }
+    } catch (e) {}
+    // fallback if the browser can't enumerate zones
+    return ["UTC","America/New_York","America/Chicago","America/Denver","America/Los_Angeles",
+            "America/Sao_Paulo","Europe/London","Europe/Paris","Europe/Berlin","Europe/Moscow",
+            "Africa/Cairo","Asia/Dubai","Asia/Kolkata","Asia/Shanghai","Asia/Tokyo",
+            "Australia/Sydney","Pacific/Auckland"];
+  }
+
+  (function fillZones() {
+    var zones = zoneList();
+    // make sure the detected/saved zone is selectable even if not in the list
+    if (zones.indexOf(localZone) === -1) zones.unshift(localZone);
+    if (zones.indexOf(settings.zone) === -1) zones.unshift(settings.zone);
+    var frag = document.createDocumentFragment();
+    zones.forEach(function (z) {
+      var o = document.createElement("option");
+      o.value = z;
+      o.textContent = z.replace(/_/g, " ");
+      frag.appendChild(o);
+    });
+    tzSel.appendChild(frag);
+    tzSel.value = settings.zone;
+  })();
+
+  // ---- formatter ----
+  var formatter;
+  function buildFormatter() {
+    var opts = { hour: "2-digit", minute: "2-digit", hour12: settings.hour12, hourCycle: settings.hour12 ? "h12" : "h23" };
+    if (settings.seconds) opts.second = "2-digit";
+    try { opts.timeZone = settings.zone; } catch (e) {}
+    try {
+      formatter = new Intl.DateTimeFormat([], opts);
+    } catch (e) {
+      delete opts.timeZone; // bad zone -> fall back to local
+      formatter = new Intl.DateTimeFormat([], opts);
+    }
+  }
+
+  // ---- fit the time to the viewport (recompute only when the length changes) ----
+  var lastLen = -1;
+  function fit() {
+    timeEl.style.fontSize = "100px";
+    var w = timeEl.getBoundingClientRect().width;
+    var h = timeEl.getBoundingClientRect().height;
+    if (w === 0 || h === 0) return;
+    var targetW = window.innerWidth  * 0.63;
+    var targetH = window.innerHeight * 0.50;
+    var scale = Math.min(targetW / w, targetH / h);
+    timeEl.style.fontSize = (100 * scale) + "px";
+  }
+
+  function render() {
+    var parts;
+    try { parts = formatter.formatToParts(new Date()); }
+    catch (e) { timeEl.textContent = "--:--"; return; }
+
+    var plain = "";
+    var html = "";
+    parts.forEach(function (p) {
+      plain += p.value;
+      if (p.type === "dayPeriod") {
+        html += '<span class="ampm">' + p.value.trim() + '</span>';
+      } else {
+        html += p.value;
+      }
+    });
+
+    timeEl.innerHTML = html;
+    document.title = plain;
+
+    if (plain.length !== lastLen) { lastLen = plain.length; fit(); }
+  }
+
+  function tick() {
+    render();
+    var delay = 1000 - (Date.now() % 1000); // align to the next whole second
+    setTimeout(tick, delay + 5);
+  }
+
+  function applyAndStart() {
+    buildFormatter();
+    lastLen = -1;       // force a refit on the next render
+    render();
+    fit();
+  }
+
+  // ---- controls ----
+  function setHour12(on) {
+    settings.hour12 = on;
+    fmt12.setAttribute("aria-pressed", on ? "true" : "false");
+    fmt24.setAttribute("aria-pressed", on ? "false" : "true");
+    store.set("clock.hour12", on ? "true" : "false");
+    applyAndStart();
+  }
+  fmt12.addEventListener("click", function () { setHour12(true); });
+  fmt24.addEventListener("click", function () { setHour12(false); });
+
+  secBtn.addEventListener("click", function () {
+    settings.seconds = !settings.seconds;
+    secBtn.setAttribute("aria-pressed", settings.seconds ? "true" : "false");
+    secBtn.textContent = "Seconds: " + (settings.seconds ? "on" : "off");
+    store.set("clock.seconds", settings.seconds ? "true" : "false");
+    applyAndStart();
+  });
+
+  tzSel.addEventListener("change", function () {
+    settings.zone = tzSel.value;
+    store.set("clock.zone", settings.zone);
+    applyAndStart();
+  });
+
+  // reflect saved state into the controls
+  fmt12.setAttribute("aria-pressed", settings.hour12 ? "true" : "false");
+  fmt24.setAttribute("aria-pressed", settings.hour12 ? "false" : "true");
+  secBtn.setAttribute("aria-pressed", settings.seconds ? "true" : "false");
+  secBtn.textContent = "Seconds: " + (settings.seconds ? "on" : "off");
+
+  // ---- idle fade (controls + cursor disappear when you stop moving) ----
+  var idleMs = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--idle"), 10) || 2400;
+  var idleTimer;
+  function wake() {
+    document.body.classList.remove("idle");
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(function () { document.body.classList.add("idle"); }, idleMs);
+  }
+  ["mousemove", "mousedown", "touchstart", "keydown", "wheel"].forEach(function (ev) {
+    window.addEventListener(ev, wake, { passive: true });
+  });
+
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") { if (document.activeElement) document.activeElement.blur(); }
+  });
+
+  window.addEventListener("resize", fit);
+  if (window.visualViewport) window.visualViewport.addEventListener("resize", fit);
+
+  // ---- go ----
+  applyAndStart();
+  tick();
+  wake();
+})();
+</script>
+</body>
+</html>
