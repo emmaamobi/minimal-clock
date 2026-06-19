@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Clock</title>
+<title>Minimal Clock</title>
 <style>
   :root {
     --bg: #000;
@@ -274,7 +274,6 @@
     });
 
     timeEl.innerHTML = html;
-    document.title = plain;
 
     if (plain.length !== lastLen) { lastLen = plain.length; fit(); }
   }
