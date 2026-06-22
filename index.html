@@ -9,7 +9,7 @@
   :root {
     --bg: #000;
     --fg: #fff;
-    --idle: 2400ms; /* how long after the last movement before everything fades away */
+    --idle: 2400ms;
   }
 
   * { box-sizing: border-box; }
@@ -25,7 +25,6 @@
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   }
 
-  /* While idle, the cursor disappears too, so the screen is nothing but the time. */
   body.idle { cursor: none; }
 
   #stage {
@@ -45,7 +44,6 @@
     font-variant-numeric: tabular-nums;
     font-feature-settings: "tnum" 1;
     letter-spacing: -0.01em;
-    /* fontSize is set precisely by JS to fill the viewport */
   }
 
   #time .ampm {
@@ -81,7 +79,6 @@
     max-width: calc(100vw - 24px);
   }
 
-  /* Visible when the user is active, or whenever a control inside has focus. */
   body:not(.idle) #panel,
   #panel:focus-within {
     opacity: 1;
@@ -96,22 +93,68 @@
     white-space: nowrap;
   }
 
-  #tz {
+  /* ---- timezone search ---- */
+  #tz-wrap {
+    position: relative;
+  }
+
+  #tz-input {
     appearance: none;
     -webkit-appearance: none;
     background: rgba(255,255,255,0.08);
     color: #fff;
     border: 1px solid rgba(255,255,255,0.12);
     border-radius: 8px;
-    padding: 6px 28px 6px 10px;
+    padding: 6px 10px;
     font: inherit;
-    max-width: 230px;
-    cursor: pointer;
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M2 4l4 4 4-4' fill='none' stroke='white' stroke-width='1.5' stroke-opacity='0.6'/></svg>");
-    background-repeat: no-repeat;
-    background-position: right 9px center;
+    width: 210px;
+    cursor: text;
+    outline: none;
   }
-  #tz option { background: #111; color: #fff; }
+  #tz-input::placeholder { color: rgba(255,255,255,0.35); }
+  #tz-input:focus { border-color: rgba(255,255,255,0.28); }
+
+  #tz-list {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    min-width: 260px;
+    background: #1c1c1e;
+    border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 12px;
+    list-style: none;
+    margin: 0;
+    padding: 4px;
+    max-height: 300px;
+    overflow-y: auto;
+    display: none;
+    z-index: 20;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+  }
+  #tz-list.open { display: block; }
+
+  #tz-list li {
+    padding: 8px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  #tz-list li:hover,
+  #tz-list li.active {
+    background: rgba(255,255,255,0.10);
+  }
+  #tz-list li .tz-label { font-size: 0.9em; color: #fff; }
+  #tz-list li .tz-sub   { font-size: 0.75em; color: rgba(255,255,255,0.40); }
+
+  #tz-list .tz-empty {
+    padding: 10px 12px;
+    color: rgba(255,255,255,0.35);
+    font-size: 0.85em;
+    cursor: default;
+  }
 
   .seg {
     display: inline-flex;
@@ -153,7 +196,8 @@
   @media (max-width: 560px) {
     #panel { gap: 12px; font-size: 13px; bottom: 18px; }
     .divider { display: none; }
-    #tz { max-width: 150px; }
+    #tz-input { width: 140px; }
+    #tz-list { min-width: 220px; }
   }
 </style>
 </head>
@@ -165,7 +209,10 @@
   <div id="panel" role="group" aria-label="Clock settings">
     <label>
       <span>Zone</span>
-      <select id="tz" aria-label="Time zone"></select>
+      <div id="tz-wrap">
+        <input id="tz-input" type="text" autocomplete="off" spellcheck="false" placeholder="Search city or zone…" aria-label="Search timezone" aria-autocomplete="list" aria-haspopup="listbox">
+        <ul id="tz-list" role="listbox" aria-label="Timezone suggestions"></ul>
+      </div>
     </label>
     <div class="divider"></div>
     <div class="seg" role="group" aria-label="Hour format">
@@ -179,13 +226,14 @@
 (function () {
   "use strict";
 
-  var timeEl = document.getElementById("time");
-  var tzSel  = document.getElementById("tz");
-  var fmt24  = document.getElementById("fmt24");
-  var fmt12  = document.getElementById("fmt12");
-  var secBtn = document.getElementById("secBtn");
+  var timeEl  = document.getElementById("time");
+  var tzInput = document.getElementById("tz-input");
+  var tzList  = document.getElementById("tz-list");
+  var fmt24   = document.getElementById("fmt24");
+  var fmt12   = document.getElementById("fmt12");
+  var secBtn  = document.getElementById("secBtn");
 
-  // ---- persisted settings (works once deployed; harmless if storage is blocked) ----
+  // ---- persisted settings ----
   var store = {
     get: function (k, d) { try { var v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } },
     set: function (k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
@@ -196,40 +244,313 @@
 
   var settings = {
     zone:    store.get("clock.zone", localZone),
+    label:   store.get("clock.label", null), // persisted display label (may be a city alias)
     hour12:  store.get("clock.hour12", "false") === "true",
     seconds: store.get("clock.seconds", "true") === "true"
   };
 
-  // ---- populate the time-zone list ----
-  function zoneList() {
-    try {
-      if (typeof Intl.supportedValuesOf === "function") {
-        var z = Intl.supportedValuesOf("timeZone");
-        if (z && z.length) return z;
-      }
-    } catch (e) {}
-    // fallback if the browser can't enumerate zones
-    return ["UTC","America/New_York","America/Chicago","America/Denver","America/Los_Angeles",
-            "America/Sao_Paulo","Europe/London","Europe/Paris","Europe/Berlin","Europe/Moscow",
-            "Africa/Cairo","Asia/Dubai","Asia/Kolkata","Asia/Shanghai","Asia/Tokyo",
-            "Australia/Sydney","Pacific/Auckland"];
+  // ---- timezone database ----
+  // `cities`  — named places in this timezone used for matching; shown as the result label when matched
+  // `desc`    — human-readable timezone name shown in the subtitle
+  // `keywords`— abbreviations and region terms (not shown as labels)
+  var TZ_DB = [
+    // North America
+    { tz: "America/New_York",               label: "New York",      desc: "Eastern Time",          keywords: "eastern et est edt nyc dc",            cities: ["Boston","Philadelphia","Atlanta","Miami","Washington","Baltimore","Charlotte","Detroit","Cleveland","Columbus","Indianapolis","Richmond","Raleigh"] },
+    { tz: "America/Chicago",                label: "Chicago",       desc: "Central Time",           keywords: "central ct cst cdt texas",             cities: ["Dallas","Houston","Austin","San Antonio","Fort Worth","Oklahoma City","Kansas City","Minneapolis","Nashville","Memphis","Milwaukee","New Orleans","Omaha","Tulsa","Wichita","Des Moines"] },
+    { tz: "America/Denver",                 label: "Denver",        desc: "Mountain Time",          keywords: "mountain mt mst mdt",                  cities: ["Salt Lake City","Boise","Albuquerque","Tucson","Colorado Springs","Cheyenne","Billings","Helena"] },
+    { tz: "America/Phoenix",                label: "Phoenix",       desc: "Mountain Time (no DST)", keywords: "arizona az mst",                       cities: ["Tucson","Scottsdale","Tempe","Mesa","Flagstaff","Chandler","Gilbert"] },
+    { tz: "America/Los_Angeles",            label: "Los Angeles",   desc: "Pacific Time",           keywords: "pacific pt pst pdt la",                cities: ["San Francisco","Seattle","Portland","Las Vegas","San Diego","Sacramento","Fresno","Oakland","San Jose","Reno","Spokane"] },
+    { tz: "America/Anchorage",              label: "Anchorage",     desc: "Alaska Time",            keywords: "alaska ak akt",                        cities: ["Fairbanks","Juneau"] },
+    { tz: "Pacific/Honolulu",               label: "Honolulu",      desc: "Hawaii Time",            keywords: "hawaii hi hst",                        cities: ["Maui","Oahu","Kauai","Hilo"] },
+    { tz: "America/Toronto",                label: "Toronto",       desc: "Eastern Time",           keywords: "ontario canada et",                    cities: ["Ottawa","Hamilton","Mississauga","London"] },
+    { tz: "America/Vancouver",              label: "Vancouver",     desc: "Pacific Time",           keywords: "british columbia canada bc pt",        cities: ["Victoria","Kelowna"] },
+    { tz: "America/Edmonton",               label: "Edmonton",      desc: "Mountain Time",          keywords: "alberta canada mt",                    cities: ["Calgary","Red Deer"] },
+    { tz: "America/Winnipeg",               label: "Winnipeg",      desc: "Central Time",           keywords: "manitoba canada ct",                   cities: [] },
+    { tz: "America/Halifax",                label: "Halifax",       desc: "Atlantic Time",          keywords: "nova scotia canada at",                cities: ["Moncton","Saint John"] },
+    { tz: "America/St_Johns",               label: "St. John's",    desc: "Newfoundland Time",      keywords: "newfoundland canada nt",               cities: [] },
+    { tz: "America/Mexico_City",            label: "Mexico City",   desc: "Central Time (Mexico)",  keywords: "cdmx mexico",                          cities: ["Guadalajara","Monterrey","Puebla"] },
+    { tz: "America/El_Paso",                label: "El Paso",       desc: "Mountain Time",          keywords: "texas tx mt",                          cities: [] },
+    { tz: "America/Puerto_Rico",            label: "Puerto Rico",   desc: "Atlantic Time",          keywords: "san juan ast",                         cities: [] },
+    { tz: "America/Panama",                 label: "Panama City",   desc: "Eastern Time (no DST)",  keywords: "panama central america est",           cities: [] },
+    // South America
+    { tz: "America/Sao_Paulo",              label: "São Paulo",     desc: "Brasília Time",          keywords: "brazil brasil brt",                    cities: ["Rio de Janeiro","Brasília","Belo Horizonte","Curitiba","Porto Alegre"] },
+    { tz: "America/Argentina/Buenos_Aires", label: "Buenos Aires",  desc: "Argentina Time",         keywords: "argentina art",                        cities: ["Córdoba","Rosario","Mendoza"] },
+    { tz: "America/Bogota",                 label: "Bogotá",        desc: "Colombia Time",          keywords: "colombia cot",                         cities: ["Medellín","Cali","Barranquilla"] },
+    { tz: "America/Lima",                   label: "Lima",          desc: "Peru Time",              keywords: "peru pet",                             cities: [] },
+    { tz: "America/Santiago",               label: "Santiago",      desc: "Chile Time",             keywords: "chile clt",                            cities: [] },
+    { tz: "America/Caracas",                label: "Caracas",       desc: "Venezuela Time",         keywords: "venezuela vet",                        cities: [] },
+    // Europe
+    { tz: "Europe/London",                  label: "London",        desc: "Greenwich Mean Time",    keywords: "uk england britain gmt bst utc wet",   cities: ["Dublin","Edinburgh","Cardiff","Belfast","Manchester","Birmingham","Liverpool"] },
+    { tz: "Europe/Paris",                   label: "Paris",         desc: "Central European Time",  keywords: "france cet cest",                      cities: ["Lyon","Marseille","Bordeaux","Toulouse","Nice"] },
+    { tz: "Europe/Berlin",                  label: "Berlin",        desc: "Central European Time",  keywords: "germany cet cest",                     cities: ["Amsterdam","Brussels","Frankfurt","Munich","Hamburg","Cologne","Stuttgart","Rotterdam","Antwerp","Luxembourg"] },
+    { tz: "Europe/Madrid",                  label: "Madrid",        desc: "Central European Time",  keywords: "spain cet",                            cities: ["Barcelona","Seville","Valencia","Bilbao"] },
+    { tz: "Europe/Rome",                    desc: "Central European Time",  label: "Rome",          keywords: "italy cet",                            cities: ["Milan","Naples","Florence","Venice","Turin"] },
+    { tz: "Europe/Zurich",                  label: "Zurich",        desc: "Central European Time",  keywords: "switzerland cet",                      cities: ["Bern","Geneva","Basel"] },
+    { tz: "Europe/Lisbon",                  label: "Lisbon",        desc: "Western European Time",  keywords: "portugal wet",                         cities: ["Porto"] },
+    { tz: "Europe/Stockholm",               label: "Stockholm",     desc: "Central European Time",  keywords: "sweden cet",                           cities: ["Oslo","Copenhagen","Helsinki","Gothenburg","Malmö"] },
+    { tz: "Europe/Helsinki",                label: "Helsinki",      desc: "Eastern European Time",  keywords: "finland eet",                          cities: ["Tallinn","Riga"] },
+    { tz: "Europe/Warsaw",                  label: "Warsaw",        desc: "Central European Time",  keywords: "poland cet",                           cities: ["Kraków","Gdańsk","Wrocław"] },
+    { tz: "Europe/Prague",                  label: "Prague",        desc: "Central European Time",  keywords: "czech republic cet",                   cities: ["Brno"] },
+    { tz: "Europe/Vienna",                  label: "Vienna",        desc: "Central European Time",  keywords: "austria cet",                          cities: ["Graz","Salzburg"] },
+    { tz: "Europe/Budapest",                label: "Budapest",      desc: "Central European Time",  keywords: "hungary cet",                          cities: [] },
+    { tz: "Europe/Bucharest",               label: "Bucharest",     desc: "Eastern European Time",  keywords: "romania eet",                          cities: [] },
+    { tz: "Europe/Athens",                  label: "Athens",        desc: "Eastern European Time",  keywords: "greece eet",                           cities: ["Thessaloniki"] },
+    { tz: "Europe/Kyiv",                    label: "Kyiv",          desc: "Eastern European Time",  keywords: "ukraine eet",                          cities: ["Kharkiv","Odessa","Lviv"] },
+    { tz: "Europe/Moscow",                  label: "Moscow",        desc: "Moscow Time",            keywords: "russia msk",                           cities: ["St Petersburg","Nizhny Novgorod","Kazan","Samara","Ufa","Voronezh"] },
+    { tz: "Europe/Istanbul",                label: "Istanbul",      desc: "Turkey Time",            keywords: "turkey trt",                           cities: ["Ankara","Izmir","Bursa"] },
+    { tz: "Europe/Minsk",                   label: "Minsk",         desc: "Further-Eastern European Time", keywords: "belarus fet",                  cities: [] },
+    // Africa
+    { tz: "Africa/Cairo",                   label: "Cairo",         desc: "Eastern European Time",  keywords: "egypt eet north africa",               cities: ["Alexandria","Giza"] },
+    { tz: "Africa/Johannesburg",            label: "Johannesburg",  desc: "South Africa Time",      keywords: "south africa sast",                    cities: ["Cape Town","Durban","Pretoria"] },
+    { tz: "Africa/Lagos",                   label: "Lagos",         desc: "West Africa Time",       keywords: "nigeria wat west africa",              cities: ["Abuja","Accra","Dakar"] },
+    { tz: "Africa/Nairobi",                 label: "Nairobi",       desc: "East Africa Time",       keywords: "kenya eat east africa",                cities: ["Addis Ababa","Kampala","Dar es Salaam"] },
+    { tz: "Africa/Casablanca",              label: "Casablanca",    desc: "Western European Time",  keywords: "morocco wet",                          cities: ["Rabat","Marrakech"] },
+    { tz: "Africa/Tunis",                   label: "Tunis",         desc: "Central European Time",  keywords: "tunisia north africa cet",             cities: [] },
+    // Middle East
+    { tz: "Asia/Dubai",                     label: "Dubai",         desc: "Gulf Time",              keywords: "uae gulf gst",                         cities: ["Abu Dhabi","Sharjah","Muscat"] },
+    { tz: "Asia/Riyadh",                    label: "Riyadh",        desc: "Arabia Time",            keywords: "saudi arabia ast",                     cities: ["Jeddah","Mecca","Medina","Kuwait City","Manama"] },
+    { tz: "Asia/Tehran",                    label: "Tehran",        desc: "Iran Time",              keywords: "iran irst",                            cities: ["Isfahan","Shiraz","Mashhad"] },
+    { tz: "Asia/Jerusalem",                 label: "Jerusalem",     desc: "Israel Time",            keywords: "israel ist",                           cities: ["Tel Aviv","Haifa"] },
+    { tz: "Asia/Beirut",                    label: "Beirut",        desc: "Eastern European Time",  keywords: "lebanon eet",                          cities: [] },
+    { tz: "Asia/Baghdad",                   label: "Baghdad",       desc: "Arabia Time",            keywords: "iraq ast",                             cities: ["Basra","Mosul"] },
+    { tz: "Asia/Qatar",                     label: "Doha",          desc: "Arabia Time",            keywords: "qatar ast",                            cities: [] },
+    // South / Central Asia
+    { tz: "Asia/Karachi",                   label: "Karachi",       desc: "Pakistan Time",          keywords: "pakistan pkt",                         cities: ["Lahore","Islamabad","Faisalabad","Rawalpindi"] },
+    { tz: "Asia/Kolkata",                   label: "India",         desc: "India Standard Time",    keywords: "ist india",                            cities: ["Mumbai","Delhi","Bangalore","Chennai","Hyderabad","Kolkata","Pune","Ahmedabad","Jaipur"] },
+    { tz: "Asia/Colombo",                   label: "Colombo",       desc: "India Standard Time",    keywords: "sri lanka ist",                        cities: [] },
+    { tz: "Asia/Kathmandu",                 label: "Kathmandu",     desc: "Nepal Time",             keywords: "nepal npt",                            cities: [] },
+    { tz: "Asia/Dhaka",                     label: "Dhaka",         desc: "Bangladesh Time",        keywords: "bangladesh bst",                       cities: ["Chittagong"] },
+    { tz: "Asia/Almaty",                    label: "Almaty",        desc: "Alma-Ata Time",          keywords: "kazakhstan almt",                      cities: ["Nur-Sultan","Astana"] },
+    { tz: "Asia/Tashkent",                  label: "Tashkent",      desc: "Uzbekistan Time",        keywords: "uzbekistan uzt",                       cities: ["Samarkand"] },
+    { tz: "Asia/Yekaterinburg",             label: "Yekaterinburg", desc: "Yekaterinburg Time",     keywords: "russia yekt",                          cities: [] },
+    // Southeast Asia
+    { tz: "Asia/Bangkok",                   label: "Bangkok",       desc: "Indochina Time",         keywords: "thailand ict indochina",               cities: ["Hanoi","Phnom Penh","Vientiane","Chiang Mai"] },
+    { tz: "Asia/Ho_Chi_Minh",               label: "Ho Chi Minh",   desc: "Indochina Time",         keywords: "vietnam saigon ict",                   cities: ["Saigon","Da Nang"] },
+    { tz: "Asia/Jakarta",                   label: "Jakarta",       desc: "Western Indonesia Time", keywords: "indonesia wib",                        cities: ["Bandung","Surabaya","Medan"] },
+    { tz: "Asia/Singapore",                 label: "Singapore",     desc: "Singapore Time",         keywords: "sgt",                                  cities: ["Kuala Lumpur","Penang"] },
+    { tz: "Asia/Manila",                    label: "Manila",        desc: "Philippine Time",        keywords: "philippines pht",                      cities: ["Cebu","Davao","Quezon City"] },
+    // East Asia
+    { tz: "Asia/Shanghai",                  label: "China",         desc: "China Standard Time",    keywords: "cst china",                            cities: ["Beijing","Shanghai","Guangzhou","Shenzhen","Chongqing","Chengdu","Wuhan","Xi'an","Hangzhou","Nanjing"] },
+    { tz: "Asia/Hong_Kong",                 label: "Hong Kong",     desc: "Hong Kong Time",         keywords: "hkt",                                  cities: ["Kowloon","Macau"] },
+    { tz: "Asia/Taipei",                    label: "Taipei",        desc: "China Standard Time",    keywords: "taiwan cst",                           cities: ["Kaohsiung","Taichung"] },
+    { tz: "Asia/Seoul",                     label: "Seoul",         desc: "Korea Standard Time",    keywords: "korea kst",                            cities: ["Busan","Incheon","Daegu"] },
+    { tz: "Asia/Tokyo",                     label: "Tokyo",         desc: "Japan Standard Time",    keywords: "japan jst",                            cities: ["Osaka","Kyoto","Yokohama","Nagoya","Sapporo","Kobe","Fukuoka"] },
+    // Oceania
+    { tz: "Australia/Sydney",               label: "Sydney",        desc: "Australian Eastern Time", keywords: "australia aest aedt",                 cities: ["Canberra","Wollongong","Newcastle"] },
+    { tz: "Australia/Melbourne",            label: "Melbourne",     desc: "Australian Eastern Time", keywords: "victoria australia",                  cities: ["Geelong","Ballarat"] },
+    { tz: "Australia/Brisbane",             label: "Brisbane",      desc: "Australian Eastern Time (no DST)", keywords: "queensland australia",        cities: ["Gold Coast","Sunshine Coast","Cairns","Townsville"] },
+    { tz: "Australia/Adelaide",             label: "Adelaide",      desc: "Australian Central Time", keywords: "south australia acst",               cities: [] },
+    { tz: "Australia/Perth",                label: "Perth",         desc: "Australian Western Time", keywords: "western australia awst",              cities: [] },
+    { tz: "Australia/Darwin",               label: "Darwin",        desc: "Australian Central Time (no DST)", keywords: "northern territory",         cities: [] },
+    { tz: "Pacific/Auckland",               label: "Auckland",      desc: "New Zealand Time",       keywords: "new zealand nzst nzdt",                cities: ["Wellington","Christchurch","Hamilton"] },
+    { tz: "Pacific/Fiji",                   label: "Fiji",          desc: "Fiji Time",              keywords: "fjt",                                  cities: ["Suva","Nadi"] },
+    { tz: "Pacific/Guam",                   label: "Guam",          desc: "Chamorro Time",          keywords: "mariana islands chst",                 cities: [] },
+    // UTC
+    { tz: "UTC",                            label: "UTC",           desc: "Coordinated Universal Time", keywords: "gmt universal utc",               cities: [] },
+  ];
+
+  // pre-build search string and lookup map
+  var TZ_MAP = {};
+  TZ_DB.forEach(function (e) {
+    e._search = (e.label + " " + e.desc + " " + e.tz.replace(/_/g, " ") + " " + e.keywords + " " + e.cities.join(" ")).toLowerCase();
+    TZ_MAP[e.tz] = e;
+  });
+
+  function labelForZone(tz) {
+    // prefer a persisted city alias label for the current zone
+    if (settings.label && settings.zone === tz) return settings.label;
+    if (TZ_MAP[tz]) return TZ_MAP[tz].label;
+    return tz.replace(/_/g, " ").replace(/.*\//, "");
   }
 
-  (function fillZones() {
-    var zones = zoneList();
-    // make sure the detected/saved zone is selectable even if not in the list
-    if (zones.indexOf(localZone) === -1) zones.unshift(localZone);
-    if (zones.indexOf(settings.zone) === -1) zones.unshift(settings.zone);
-    var frag = document.createDocumentFragment();
-    zones.forEach(function (z) {
-      var o = document.createElement("option");
-      o.value = z;
-      o.textContent = z.replace(/_/g, " ");
-      frag.appendChild(o);
+  // capitalise a matched word from the cities list
+  function titleCase(s) {
+    return s.replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+  }
+
+  // ---- search logic ----
+  function searchZones(query) {
+    query = query.trim().toLowerCase();
+    if (!query) {
+      return ["America/New_York","America/Chicago","America/Denver","America/Los_Angeles",
+              "Europe/London","Europe/Paris","Europe/Berlin","Asia/Tokyo","Asia/Shanghai",
+              "Australia/Sydney","UTC"].map(function (tz) {
+        return TZ_MAP[tz] || { tz: tz, label: labelForZone(tz), desc: tz, cities: [], _search: tz };
+      });
+    }
+
+    var results = [];
+    TZ_DB.forEach(function (e) {
+      var score = 0;
+      var matchedCity = null;
+
+      // check city alias match first — gives the result a context-aware label
+      e.cities.forEach(function (city) {
+        var cl = city.toLowerCase();
+        if (!matchedCity) {
+          if (cl === query)             { score = Math.max(score, 110); matchedCity = city; }
+          else if (cl.startsWith(query)){ score = Math.max(score, 90);  matchedCity = city; }
+          else if (cl.includes(query))  { score = Math.max(score, 65);  matchedCity = city; }
+        }
+      });
+
+      if (!matchedCity) {
+        var lbl = e.label.toLowerCase();
+        var tzl = e.tz.toLowerCase().replace(/_/g, " ");
+        if (lbl === query || tzl === query)                  { score = 100; }
+        else if (lbl.startsWith(query))                      { score = 85; }
+        else if (tzl.split("/").pop().startsWith(query))     { score = 80; }
+        else if (e._search.split(" ").some(function(w){ return w.startsWith(query); })) { score = 60; }
+        else if (e._search.includes(query))                  { score = 40; }
+      }
+
+      if (score > 0) results.push({ entry: e, score: score, matchedCity: matchedCity });
     });
-    tzSel.appendChild(frag);
-    tzSel.value = settings.zone;
-  })();
+
+    results.sort(function (a, b) { return b.score - a.score; });
+
+    var out = results.map(function (r) {
+      var e = r.entry;
+      if (r.matchedCity) {
+        // show the matched city as the label; clarify it's the same time as the canonical city
+        var note = r.matchedCity.toLowerCase() === e.label.toLowerCase()
+          ? e.desc
+          : e.desc + " · same time as " + e.label;
+        return { tz: e.tz, label: titleCase(r.matchedCity), desc: note, _isAlias: true };
+      }
+      return { tz: e.tz, label: e.label, desc: e.desc };
+    });
+
+    // 2. fill with IANA list matches not already in curated set (if fewer than 8 results)
+    if (out.length < 8) {
+      try {
+        var all = (typeof Intl.supportedValuesOf === "function") ? Intl.supportedValuesOf("timeZone") : [];
+        var seen = {};
+        out.forEach(function (e) { seen[e.tz] = true; });
+        all.forEach(function (tz) {
+          if (seen[tz]) return;
+          if (tz.toLowerCase().replace(/_/g," ").includes(query)) {
+            out.push({ tz: tz, label: labelForZone(tz), desc: tz });
+            seen[tz] = true;
+          }
+        });
+      } catch (e) {}
+    }
+
+    return out.slice(0, 10);
+  }
+
+  // ---- dropdown state ----
+  var activeIdx = -1;
+  var currentResults = [];
+  var pendingZone = settings.zone; // zone committed on select
+
+  function showList(results) {
+    currentResults = results;
+    activeIdx = -1;
+    tzList.innerHTML = "";
+    if (!results.length) {
+      var li = document.createElement("li");
+      li.className = "tz-empty";
+      li.textContent = "No results";
+      tzList.appendChild(li);
+      tzList.classList.add("open");
+      return;
+    }
+    results.forEach(function (e, i) {
+      var li = document.createElement("li");
+      li.setAttribute("role", "option");
+      li.setAttribute("data-tz", e.tz);
+      var lblEl = document.createElement("span");
+      lblEl.className = "tz-label";
+      lblEl.textContent = e.label;
+      var subEl = document.createElement("span");
+      subEl.className = "tz-sub";
+      subEl.textContent = e.desc || e.tz;
+      li.appendChild(lblEl);
+      li.appendChild(subEl);
+      li.addEventListener("mousedown", function (ev) {
+        ev.preventDefault(); // don't blur input
+        selectEntry(e);
+      });
+      li.addEventListener("mousemove", function () { setActive(i); });
+      tzList.appendChild(li);
+    });
+    tzList.classList.add("open");
+  }
+
+  function hideList() {
+    tzList.classList.remove("open");
+    activeIdx = -1;
+  }
+
+  function setActive(idx) {
+    var items = tzList.querySelectorAll("li[role='option']");
+    items.forEach(function (el, i) { el.classList.toggle("active", i === idx); });
+    activeIdx = idx;
+  }
+
+  function selectEntry(e) {
+    pendingZone = e.tz;
+    settings.zone = e.tz;
+    settings.label = e.label;
+    store.set("clock.zone", e.tz);
+    store.set("clock.label", e.label);
+    tzInput.value = e.label;
+    hideList();
+    applyAndStart();
+  }
+
+  tzInput.addEventListener("focus", function () {
+    tzInput.select();
+    showList(searchZones(tzInput.value === labelForZone(settings.zone) ? "" : tzInput.value));
+  });
+
+  tzInput.addEventListener("input", function () {
+    showList(searchZones(tzInput.value));
+  });
+
+  tzInput.addEventListener("blur", function () {
+    // restore label if nothing was selected
+    setTimeout(function () {
+      if (!tzList.classList.contains("open")) return;
+      hideList();
+      tzInput.value = labelForZone(settings.zone);
+    }, 150);
+  });
+
+  tzInput.addEventListener("keydown", function (e) {
+    var items = tzList.querySelectorAll("li[role='option']");
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActive(Math.min(activeIdx + 1, items.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActive(Math.max(activeIdx - 1, 0));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (activeIdx >= 0 && currentResults[activeIdx]) {
+        selectEntry(currentResults[activeIdx]);
+      } else if (currentResults.length > 0) {
+        selectEntry(currentResults[0]);
+      }
+    } else if (e.key === "Escape") {
+      hideList();
+      tzInput.value = labelForZone(settings.zone);
+      tzInput.blur();
+    }
+  });
+
+  // close list when clicking outside
+  document.addEventListener("mousedown", function (e) {
+    if (!document.getElementById("tz-wrap").contains(e.target)) {
+      hideList();
+      tzInput.value = labelForZone(settings.zone);
+    }
+  });
+
+  // set initial input label
+  tzInput.value = labelForZone(settings.zone);
 
   // ---- formatter ----
   var formatter;
@@ -240,12 +561,12 @@
     try {
       formatter = new Intl.DateTimeFormat([], opts);
     } catch (e) {
-      delete opts.timeZone; // bad zone -> fall back to local
+      delete opts.timeZone;
       formatter = new Intl.DateTimeFormat([], opts);
     }
   }
 
-  // ---- fit the time to the viewport (recompute only when the length changes) ----
+  // ---- fit the time to the viewport ----
   var lastLen = -1;
   function fit() {
     timeEl.style.fontSize = "100px";
@@ -275,19 +596,18 @@
     });
 
     timeEl.innerHTML = html;
-
     if (plain.length !== lastLen) { lastLen = plain.length; fit(); }
   }
 
   function tick() {
     render();
-    var delay = 1000 - (Date.now() % 1000); // align to the next whole second
+    var delay = 1000 - (Date.now() % 1000);
     setTimeout(tick, delay + 5);
   }
 
   function applyAndStart() {
     buildFormatter();
-    lastLen = -1;       // force a refit on the next render
+    lastLen = -1;
     render();
     fit();
   }
@@ -311,19 +631,13 @@
     applyAndStart();
   });
 
-  tzSel.addEventListener("change", function () {
-    settings.zone = tzSel.value;
-    store.set("clock.zone", settings.zone);
-    applyAndStart();
-  });
-
-  // reflect saved state into the controls
+  // reflect saved state into controls
   fmt12.setAttribute("aria-pressed", settings.hour12 ? "true" : "false");
   fmt24.setAttribute("aria-pressed", settings.hour12 ? "false" : "true");
   secBtn.setAttribute("aria-pressed", settings.seconds ? "true" : "false");
   secBtn.textContent = "Seconds: " + (settings.seconds ? "on" : "off");
 
-  // ---- idle fade (controls + cursor disappear when you stop moving) ----
+  // ---- idle fade ----
   var idleMs = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--idle"), 10) || 2400;
   var idleTimer;
   function wake() {
